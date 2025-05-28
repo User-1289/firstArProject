@@ -10,14 +10,85 @@ import RealityKit
 import ARKit
 import Vision
 
+// MARK: - Todo Task Model
+struct TodoTask: Codable, Identifiable, Equatable {
+    let id = UUID()
+    var text: String
+    var position: SIMD3<Float>
+    var isCompleted: Bool = false
+    
+    init(text: String, position: SIMD3<Float> = SIMD3<Float>(0, 0.1, -0.3)) {
+        self.text = text
+        self.position = position
+    }
+}
+
 struct ContentView: View {
+    @State private var todoTasks: [TodoTask] = []
+    @State private var newTaskText = ""
+    @State private var showingAddTask = false
+    @AppStorage("savedTodos") private var savedTodosData: Data = Data()
+    
     var body: some View {
-        ARViewContainer()
-            .ignoresSafeArea()
+        ZStack {
+            ARViewContainer(todoTasks: $todoTasks)
+                .ignoresSafeArea()
+            
+            // Overlay UI
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        showingAddTask = true
+                    }) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title)
+                            .foregroundColor(.white)
+                            .background(Color.blue.opacity(0.8))
+                            .clipShape(Circle())
+                    }
+                    .padding()
+                }
+                Spacer()
+            }
+        }
+        .onAppear {
+            loadTodos()
+        }
+        .onChange(of: todoTasks) { _ in
+            saveTodos()
+        }
+        .alert("Add Todo Task", isPresented: $showingAddTask) {
+            TextField("Enter task", text: $newTaskText)
+            Button("Add") {
+                if !newTaskText.isEmpty {
+                    let newTask = TodoTask(text: newTaskText)
+                    todoTasks.append(newTask)
+                    newTaskText = ""
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                newTaskText = ""
+            }
+        }
+    }
+    
+    private func saveTodos() {
+        if let encoded = try? JSONEncoder().encode(todoTasks) {
+            savedTodosData = encoded
+        }
+    }
+    
+    private func loadTodos() {
+        if let decoded = try? JSONDecoder().decode([TodoTask].self, from: savedTodosData) {
+            todoTasks = decoded
+        }
     }
 }
 
 struct ARViewContainer: UIViewRepresentable {
+    @Binding var todoTasks: [TodoTask]
+    
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
         
@@ -32,33 +103,21 @@ struct ARViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: ARView, context: Context) {
-        // Updates can be handled here if needed
+        // Update todo tasks in AR scene
+        uiView.handTrackingCoordinator?.updateTodoTasks(todoTasks)
     }
     
     private func setupScene(_ arView: ARView) {
-        // Create a cube model
-        let cubeEntity = ModelEntity(
-            mesh: .generateBox(size: 0.1, cornerRadius: 0.005),
-            materials: [SimpleMaterial(color: .gray, roughness: 0.15, isMetallic: true)]
-        )
-        cubeEntity.position = [0, 0.05, 0]
-        cubeEntity.name = "cube"
-        
-        // Add collision and input components
-        cubeEntity.collision = CollisionComponent(shapes: [.generateBox(size: [0.1, 0.1, 0.1])])
-        cubeEntity.components.set(InputTargetComponent())
-        
         // Create anchor entity
         let anchorEntity = AnchorEntity(.plane(.horizontal, classification: .any, minimumBounds: [0.2, 0.2]))
-        anchorEntity.addChild(cubeEntity)
         
         // Add to scene
         arView.scene.addAnchor(anchorEntity)
         
-        // Store reference to cube for hand tracking
-        arView.handTrackingCoordinator?.cubeEntity = cubeEntity
+        // Store reference to anchor for todo tasks
+        arView.handTrackingCoordinator?.anchorEntity = anchorEntity
         
-        // Add touch gesture (your original feature)
+        // Add touch gestures
         arView.addGestureRecognizer(
             UITapGestureRecognizer(target: arView.handTrackingCoordinator!, action: #selector(HandTrackingCoordinator.handleTap(_:)))
         )
@@ -86,10 +145,13 @@ extension ARView {
 
 class HandTrackingCoordinator: NSObject, ARSessionDelegate {
     private let arView: ARView
-    var cubeEntity: ModelEntity?
+    var anchorEntity: AnchorEntity?
+    private var todoEntities: [UUID: ModelEntity] = [:]
+    private var todoTasks: [TodoTask] = []
     private var isPinching = false
     private var lastPinchPosition: SIMD3<Float>?
     private var selectedEntity: ModelEntity?
+    private var selectedTaskId: UUID?
     
     // Vision framework for hand tracking
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
@@ -100,6 +162,75 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
         super.init()
         setupHandTracking()
         setupHandPoseRequest()
+    }
+    
+    func updateTodoTasks(_ tasks: [TodoTask]) {
+        // Remove entities for tasks that no longer exist
+        let currentTaskIds = Set(tasks.map { $0.id })
+        let entitiesToRemove = todoEntities.keys.filter { !currentTaskIds.contains($0) }
+        
+        for taskId in entitiesToRemove {
+            if let entity = todoEntities[taskId] {
+                entity.removeFromParent()
+                todoEntities.removeValue(forKey: taskId)
+            }
+        }
+        
+        // Add or update entities for existing tasks
+        for task in tasks {
+            if todoEntities[task.id] == nil {
+                createTodoEntity(for: task)
+            } else {
+                updateTodoEntity(for: task)
+            }
+        }
+        
+        todoTasks = tasks
+    }
+    
+    private func createTodoEntity(for task: TodoTask) {
+        guard let anchorEntity = anchorEntity else { return }
+        
+        // Create a sphere for the todo task
+        let todoEntity = ModelEntity(
+            mesh: .generateSphere(radius: 0.05),
+            materials: [SimpleMaterial(color: task.isCompleted ? .green : .orange, roughness: 0.15, isMetallic: true)]
+        )
+        
+        todoEntity.position = task.position
+        todoEntity.name = "todo_\(task.id.uuidString)"
+        
+        // Add collision and input components
+        todoEntity.collision = CollisionComponent(shapes: [.generateSphere(radius: 0.05)])
+        todoEntity.components.set(InputTargetComponent())
+        
+        // Add text label (simple approach using a colored box above the sphere)
+        let labelEntity = ModelEntity(
+            mesh: .generateBox(size: [0.1, 0.02, 0.01]),
+            materials: [SimpleMaterial(color: .white, isMetallic: false)]
+        )
+        labelEntity.position = [0, 0.08, 0]
+        todoEntity.addChild(labelEntity)
+        
+        anchorEntity.addChild(todoEntity)
+        todoEntities[task.id] = todoEntity
+    }
+    
+    private func updateTodoEntity(for task: TodoTask) {
+        guard let entity = todoEntities[task.id] else { return }
+        
+        entity.position = task.position
+        entity.model?.materials = [SimpleMaterial(color: task.isCompleted ? .green : .orange, roughness: 0.15, isMetallic: true)]
+    }
+    
+    private func updateTaskPosition(taskId: UUID, position: SIMD3<Float>) {
+        if let index = todoTasks.firstIndex(where: { $0.id == taskId }) {
+            todoTasks[index].position = position
+            // Notify the view to save changes
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .todoPositionUpdated, object: self.todoTasks)
+            }
+        }
     }
     
     private func setupHandPoseRequest() {
@@ -125,65 +256,63 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
         print("AR session configured and running")
     }
     
-    private func requestHandTrackingAuthorization() {
-        // Check if AR World Tracking is supported
-        guard ARWorldTrackingConfiguration.isSupported else {
-            print("AR World Tracking not supported on this device")
-            return
-        }
-        
-        // AR permissions are handled automatically when session runs
-        print("AR session will request camera permission when needed")
-    }
-    
-    // MARK: - Touch Gestures (Original Feature)
     @objc func handleTap(_ gesture: UITapGestureRecognizer) {
         let location = gesture.location(in: arView)
         
-        if let entity = arView.entity(at: location) as? ModelEntity {
+        if let entity = arView.entity(at: location) as? ModelEntity,
+           entity.name.hasPrefix("todo_") {  // Use entity.name directly, no 'let' binding
+            
             selectedEntity = entity
+            let taskIdString = String(entity.name.dropFirst(5)) // Use entity.name directly
+            selectedTaskId = UUID(uuidString: taskIdString)
+            
             // Visual feedback for selection
             entity.model?.materials = [SimpleMaterial(color: .blue, roughness: 0.15, isMetallic: true)]
         } else {
-            selectedEntity?.model?.materials = [SimpleMaterial(color: .gray, roughness: 0.15, isMetallic: true)]
+            // Deselect
+            if let selected = selectedEntity, let taskId = selectedTaskId {
+                let task = todoTasks.first { $0.id == taskId }
+                let color: UIColor = task?.isCompleted == true ? .green : .orange
+                selected.model?.materials = [SimpleMaterial(color: color, roughness: 0.15, isMetallic: true)]
+            }
             selectedEntity = nil
+            selectedTaskId = nil
         }
     }
     
     @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
-        guard let entity = selectedEntity else { return }
+        guard let entity = selectedEntity, let taskId = selectedTaskId else { return }
         
         let translation = gesture.translation(in: arView)
         
         // Convert screen movement to world movement
-        entity.position += SIMD3<Float>(
+        let newPosition = entity.position + SIMD3<Float>(
             Float(translation.x * 0.0001),
             0,
             Float(translation.y * 0.0001)
         )
         
+        entity.position = newPosition
+        updateTaskPosition(taskId: taskId, position: newPosition)
+        
         gesture.setTranslation(.zero, in: arView)
     }
     
-    // MARK: - Hand Tracking (New Feature)
+    // MARK: - Hand Tracking
     private func processHandTracking(_ frame: ARFrame) {
-        // Convert ARFrame to CVPixelBuffer for Vision
         let pixelBuffer = frame.capturedImage
         
-        // Perform hand pose detection
         do {
             try sequenceHandler.perform([handPoseRequest], on: pixelBuffer, orientation: .up)
             
             guard let observation = handPoseRequest.results?.first else {
-                // No hand detected
                 if isPinching {
                     isPinching = false
-                    resetCubeColor()
+                    resetSelectedEntityColor()
                 }
                 return
             }
             
-            // Process the hand observation
             processHandObservation(observation, in: frame)
             
         } catch {
@@ -192,82 +321,32 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
     }
     
     private func processHandObservation(_ observation: VNHumanHandPoseObservation, in frame: ARFrame) {
-        guard let cubeEntity = cubeEntity else { return }
-        
         do {
-            // Get thumb tip and index finger tip points
-            let allPoints = try observation.recognizedPoints(.all)
             let thumbTip = try observation.recognizedPoint(.thumbTip)
             let indexTip = try observation.recognizedPoint(.indexTip)
-            // Use the correct joint names - these are the actual available joints in Vision framework
+            
             guard thumbTip.confidence > 0.5, indexTip.confidence > 0.5 else {
                 if isPinching {
                     isPinching = false
-                    resetCubeColor()
+                    resetSelectedEntityColor()
                 }
                 return
             }
             
-            // Calculate distance between thumb and index finger (in normalized coordinates)
             let thumbLocation = thumbTip.location
             let indexLocation = indexTip.location
             let distance = sqrt(pow(thumbLocation.x - indexLocation.x, 2) + pow(thumbLocation.y - indexLocation.y, 2))
             
-            // Pinch threshold (adjust as needed)
             let pinchThreshold: CGFloat = 0.05
             
             if distance < pinchThreshold {
-                // Pinching detected
-                if !isPinching {
-                    isPinching = true
-                    setCubeSelectedColor()
-                    
-                    // Convert screen point to world position
-                    let midPoint = CGPoint(
-                        x: (thumbLocation.x + indexLocation.x) / 2,
-                        y: 1.0 - (thumbLocation.y + indexLocation.y) / 2 // Flip Y coordinate
-                    )
-                    
-                    // Convert to view coordinates
-                    let viewSize = arView.bounds.size
-                    let screenPoint = CGPoint(
-                        x: midPoint.x * viewSize.width,
-                        y: midPoint.y * viewSize.height
-                    )
-                    
-                    // Raycast from camera through hand position
-                    if let raycastResult = arView.raycast(from: screenPoint, allowing: .existingPlaneInfinite, alignment: .horizontal).first {
-                        lastPinchPosition = raycastResult.worldTransform.translation
-                    }
-                } else {
-                    // Continue pinching - move cube
-                    let midPoint = CGPoint(
-                        x: (thumbLocation.x + indexLocation.x) / 2,
-                        y: 1.0 - (thumbLocation.y + indexLocation.y) / 2
-                    )
-                    
-                    let viewSize = arView.bounds.size
-                    let screenPoint = CGPoint(
-                        x: midPoint.x * viewSize.width,
-                        y: midPoint.y * viewSize.height
-                    )
-                    
-                    if let raycastResult = arView.raycast(from: screenPoint, allowing: .existingPlaneInfinite, alignment: .horizontal).first {
-                        let newPosition = raycastResult.worldTransform.translation
-                        
-                        if let lastPos = lastPinchPosition {
-                            let movement = newPosition - lastPos
-                            cubeEntity.position += movement
-                        }
-                        
-                        lastPinchPosition = newPosition
-                    }
-                }
+                handlePinchGesture(thumbLocation: thumbLocation, indexLocation: indexLocation, frame: frame)
             } else {
-                // Not pinching
                 if isPinching {
                     isPinching = false
-                    resetCubeColor()
+                    resetSelectedEntityColor()
+                    selectedEntity = nil
+                    selectedTaskId = nil
                 }
                 lastPinchPosition = nil
             }
@@ -277,27 +356,72 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
         }
     }
     
-    private func setCubeSelectedColor() {
-        cubeEntity?.model?.materials = [SimpleMaterial(color: .green, roughness: 0.15, isMetallic: true)]
+    private func handlePinchGesture(thumbLocation: CGPoint, indexLocation: CGPoint, frame: ARFrame) {
+        let midPoint = CGPoint(
+            x: (thumbLocation.x + indexLocation.x) / 2,
+            y: 1.0 - (thumbLocation.y + indexLocation.y) / 2
+        )
+        
+        let viewSize = arView.bounds.size
+        let screenPoint = CGPoint(
+            x: midPoint.x * viewSize.width,
+            y: midPoint.y * viewSize.height
+        )
+        
+        if !isPinching {
+            // Start pinching - select entity at hand position
+            if let entity = arView.entity(at: screenPoint) as? ModelEntity,
+                entity.name.hasPrefix("todo_") {
+                
+                isPinching = true
+                selectedEntity = entity
+                let taskIdString = String(entity.name.dropFirst(5))
+                selectedTaskId = UUID(uuidString: taskIdString)
+                
+                entity.model?.materials = [SimpleMaterial(color: .blue, roughness: 0.15, isMetallic: true)]
+                
+                if let raycastResult = arView.raycast(from: screenPoint, allowing: .existingPlaneInfinite, alignment: .horizontal).first {
+                    lastPinchPosition = raycastResult.worldTransform.translation
+                }
+            }
+        } else if let entity = selectedEntity, let taskId = selectedTaskId {
+            // Continue pinching - move entity
+            if let raycastResult = arView.raycast(from: screenPoint, allowing: .existingPlaneInfinite, alignment: .horizontal).first {
+                let newPosition = raycastResult.worldTransform.translation
+                
+                if let lastPos = lastPinchPosition {
+                    let movement = newPosition - lastPos
+                    let updatedPosition = entity.position + movement
+                    entity.position = updatedPosition
+                    updateTaskPosition(taskId: taskId, position: updatedPosition)
+                }
+                
+                lastPinchPosition = newPosition
+            }
+        }
     }
     
-    private func resetCubeColor() {
-        cubeEntity?.model?.materials = [SimpleMaterial(color: .gray, roughness: 0.15, isMetallic: true)]
-    }
-    
-    private func detectPinchGesture(in frame: ARFrame) {
-        // This method is replaced by processHandObservation above
+    private func resetSelectedEntityColor() {
+        if let entity = selectedEntity, let taskId = selectedTaskId {
+            let task = todoTasks.first { $0.id == taskId }
+            let color: UIColor = task?.isCompleted == true ? .green : .orange
+            entity.model?.materials = [SimpleMaterial(color: color, roughness: 0.15, isMetallic: true)]
+        }
     }
     
     // MARK: - ARSessionDelegate
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // Process hand tracking on each frame
         processHandTracking(frame)
     }
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         // Handle new anchors
     }
+}
+
+// Notification for position updates
+extension Notification.Name {
+    static let todoPositionUpdated = Notification.Name("todoPositionUpdated")
 }
 
 // Extension to get translation from matrix
