@@ -226,6 +226,21 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
         )
         labelEntity.position = [0, 0.1, 0]
         todoEntity.addChild(labelEntity)
+
+        // Add 3D text label above the sphere showing the actual task text
+        let mesh = MeshResource.generateText(
+            task.text,
+            extrusionDepth: 0.01,
+            font: .systemFont(ofSize: 0.05),
+            containerFrame: .zero,
+            alignment: .center,
+            lineBreakMode: .byWordWrapping
+        )
+        let material = SimpleMaterial(color: .black, isMetallic: false)
+        let textEntity = ModelEntity(mesh: mesh, materials: [material])
+        textEntity.position = [0, 0.13, 0]
+        textEntity.scale = SIMD3<Float>(repeating: 0.2)
+        todoEntity.addChild(textEntity)
         
         anchorEntity.addChild(todoEntity)
         todoEntities[task.id] = todoEntity
