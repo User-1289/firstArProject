@@ -14,10 +14,10 @@ import Vision
 struct TodoTask: Codable, Identifiable, Equatable {
     let id = UUID()
     var text: String
-    var position: SIMD3<Float>
+    var position: SIMD3<Float> = SIMD3<Float>(0, 0.1, -1.0)
     var isCompleted: Bool = false
     
-    init(text: String, position: SIMD3<Float> = SIMD3<Float>(0, 0.1, -0.3)) {
+    init(text: String, position: SIMD3<Float> = SIMD3<Float>(0, 0.1, -1.0)) {
         self.text = text
         self.position = position
     }
@@ -55,8 +55,13 @@ struct ContentView: View {
         .onAppear {
             loadTodos()
         }
-        .onChange(of: todoTasks) { _ in
+        .onChange(of: todoTasks) {
             saveTodos()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .todoPositionUpdated)) { notification in
+            if let updatedTasks = notification.object as? [TodoTask] {
+                todoTasks = updatedTasks
+            }
         }
         .alert("Add Todo Task", isPresented: $showingAddTask) {
             TextField("Enter task", text: $newTaskText)
@@ -77,6 +82,10 @@ struct ContentView: View {
         if let encoded = try? JSONEncoder().encode(todoTasks) {
             savedTodosData = encoded
         }
+        // Make the tasks appear by posting notification to update AR scene
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .todoTasksUpdated, object: todoTasks)
+        }
     }
     
     private func loadTodos() {
@@ -89,28 +98,34 @@ struct ContentView: View {
 struct ARViewContainer: UIViewRepresentable {
     @Binding var todoTasks: [TodoTask]
     
-    func makeUIView(context: Context) -> ARView {
-        let arView = ARView(frame: .zero)
-        
-        // Create hand tracking coordinator
-        let coordinator = HandTrackingCoordinator(arView: arView)
-        arView.handTrackingCoordinator = coordinator
-        
-        // Set up the scene
-        setupScene(arView)
-        
-        return arView
+func makeUIView(context: Context) -> ARView {
+    let arView = ARView(frame: .zero)
+
+    // Create hand tracking coordinator
+    let coordinator = HandTrackingCoordinator(arView: arView)
+    arView.handTrackingCoordinator = coordinator
+
+    // Set up the scene
+    setupScene(arView)
+
+    // 🛠 Delay update until anchorEntity is ready
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        coordinator.updateTodoTasks(todoTasks)
     }
+
+    return arView
+}
     
-    func updateUIView(_ uiView: ARView, context: Context) {
-        // Update todo tasks in AR scene
+func updateUIView(_ uiView: ARView, context: Context) {
+    // Only update if the anchor is ready
+    if uiView.handTrackingCoordinator?.anchorEntity != nil {
         uiView.handTrackingCoordinator?.updateTodoTasks(todoTasks)
     }
+}
     
     private func setupScene(_ arView: ARView) {
         // Create anchor entity
-        let anchorEntity = AnchorEntity(.plane(.horizontal, classification: .any, minimumBounds: [0.2, 0.2]))
-        
+        let anchorEntity = AnchorEntity(world: .zero)
         // Add to scene
         arView.scene.addAnchor(anchorEntity)
         
@@ -193,7 +208,7 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
         
         // Create a sphere for the todo task
         let todoEntity = ModelEntity(
-            mesh: .generateSphere(radius: 0.05),
+            mesh: .generateSphere(radius: 0.07),
             materials: [SimpleMaterial(color: task.isCompleted ? .green : .orange, roughness: 0.15, isMetallic: true)]
         )
         
@@ -201,19 +216,20 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
         todoEntity.name = "todo_\(task.id.uuidString)"
         
         // Add collision and input components
-        todoEntity.collision = CollisionComponent(shapes: [.generateSphere(radius: 0.05)])
+        todoEntity.collision = CollisionComponent(shapes: [.generateSphere(radius: 0.07)])
         todoEntity.components.set(InputTargetComponent())
         
         // Add text label (simple approach using a colored box above the sphere)
         let labelEntity = ModelEntity(
-            mesh: .generateBox(size: [0.1, 0.02, 0.01]),
+            mesh: .generateBox(size: [0.15, 0.025, 0.01]),
             materials: [SimpleMaterial(color: .white, isMetallic: false)]
         )
-        labelEntity.position = [0, 0.08, 0]
+        labelEntity.position = [0, 0.1, 0]
         todoEntity.addChild(labelEntity)
         
         anchorEntity.addChild(todoEntity)
         todoEntities[task.id] = todoEntity
+        print("Created todo entity at position: \(task.position)")
     }
     
     private func updateTodoEntity(for task: TodoTask) {
@@ -422,6 +438,7 @@ class HandTrackingCoordinator: NSObject, ARSessionDelegate {
 // Notification for position updates
 extension Notification.Name {
     static let todoPositionUpdated = Notification.Name("todoPositionUpdated")
+    static let todoTasksUpdated = Notification.Name("todoTasksUpdated")
 }
 
 // Extension to get translation from matrix
