@@ -9,16 +9,19 @@ import SwiftUI
 import RealityKit
 
 struct ContentView : View {
-
+    @State private var currentColor = Color.blue
+    @State private var model: Entity = Entity()
+    
     var body: some View {
         RealityView { content in
 
             // Create a cube model
-            let model = Entity()
             let mesh = MeshResource.generateBox(size: 0.1, cornerRadius: 0.005)
-            let material = SimpleMaterial(color: .gray, roughness: 0.15, isMetallic: true)
+            let material = SimpleMaterial(color: UIColor(currentColor), roughness: 0.15, isMetallic: true)
             model.components.set(ModelComponent(mesh: mesh, materials: [material]))
             model.position = [0, 0.05, 0]
+            //set scale
+            //model.scale = [0.1, 0.1, 0.1]
             
             // Add collision and input components to make cube movable
             model.components.set(CollisionComponent(shapes: [.generateBox(size: [0.1, 0.1, 0.1])]))
@@ -43,6 +46,23 @@ struct ContentView : View {
                         0,
                         Float(value.translation.height * 0.0001)
                     )
+                }
+        )
+        .gesture(
+            TapGesture()
+                .targetedToEntity(model)
+                .onEnded { value in
+                    let newColor = UIColor(
+                        red: .random(in: 0...1),
+                        green: .random(in: 0...1),
+                        blue: .random(in: 0...1),
+                        alpha: 1.0
+                    )
+                    let newMaterial = SimpleMaterial(color: newColor, roughness: 0.15, isMetallic: true)
+                    if var modelComponent = model.components[ModelComponent.self] {
+                        modelComponent.materials = [newMaterial]
+                        model.components.set(modelComponent)
+                    }
                 }
         )
         .ignoresSafeArea()
